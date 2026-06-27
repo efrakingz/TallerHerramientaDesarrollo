@@ -1,0 +1,26 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: sansaweigh
+  data:
+    mongodb:
+      uri: mongodb://localhost:27017/sansaweigh
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 2000ms
+
+sansaweigh:
+  sansa-to-kg: 1.337
+  redis:
+    scale-cache-ttl: 120
+  external:
+    scale-api-url: http://localhost:9090/api/scales
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html

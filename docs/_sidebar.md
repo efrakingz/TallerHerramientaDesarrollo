@@ -1,0 +1,7 @@
+- **Inicio**
+  - [🏠 Home](/)
+  - [🏗️ Arquitectura](arquitectura.md)
+  - [⚖️ Reglas de Negocio](reglas-negocio.md)
+  - [📡 API Reference](api-reference.md)
+  - [🛠️ Configuración del Entorno](configuracion.md)
+  - [🧪 Suite de Pruebas](pruebas.md)

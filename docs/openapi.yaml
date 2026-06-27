@@ -1,0 +1,425 @@
+openapi: 3.1.0
+info:
+  title: SansaWeigh API
+  description: |
+    ## Sistema de Gestión de Estaciones de Pesaje de Paquetes
+
+    La empresa de logística **SansaWeigh** necesita un microservicio para gestionar estaciones
+    de pesaje de paquetes. El sistema clasifica paquetes por peso, calcula tarifas de
+    procesamiento con reglas dinámicas, persiste el historial en MongoDB, cachea
+    configuraciones de balanzas en Redis e integra un registro externo de especificaciones
+    de balanzas.
+
+    ### Unidad de Medida
+    El sistema trabaja en **Sansas (S)**: `1 Sansa = 1.337 kg`
+
+    ### Categorías de Peso
+    | Categoría | Rango |
+    |-----------|-------|
+    | LIVIANO   | ≤ 10 Sansas |
+    | MEDIANO   | > 10 y ≤ 50 Sansas |
+    | PESADO    | > 50 Sansas |
+
+    ### Ciclo de Vida de un Pesaje
+    ```
+    INGRESADO → PESADO → APROBADO o RECHAZADO → DESPACHADO
+    ```
+
+    ### Restricciones de Negocio
+    - **Restricción Nocturna**: Paquetes PESADO bloqueados entre 20:00 y 06:00 hrs del servidor.
+    - **Regla Balanza Prima**: Si el ID de la balanza es número primo y el día del mes es impar, no se pueden registrar paquetes PESADO.
+    - **Fallback Redis**: Si la API externa de balanzas no está disponible, se usa caché Redis (TTL 120s). Si no hay caché, se carga especificación por defecto con id `-1`.
+    - **Reintentos Exponenciales**: `ExternalScaleClient` reintenta hasta 3 veces ante errores transitorios.
+
+  version: 1.0.0
+  contact:
+    name: Universidad Técnica Federico Santa María
+  license:
+    name: Academic Use
+
+servers:
+  - url: http://localhost:8080
+    description: Servidor local de desarrollo
+
+tags:
+  - name: Pesajes
+    description: Operaciones para gestionar registros de pesaje de paquetes
+
+paths:
+  /api/pesajes:
+    post:
+      tags:
+        - Pesajes
+      summary: Crear un nuevo registro de pesaje
+      description: |
+        Crea un nuevo registro de pesaje en estado **INGRESADO**.
+
+        El sistema automáticamente:
+        - Convierte el peso de kg a Sansas (÷ 1.337)
+        - Clasifica el paquete (LIVIANO / MEDIANO / PESADO)
+        - Valida restricciones horarias y de balanza prima
+        - Consulta especificaciones de balanza (con fallback Redis)
+      operationId: createPesaje
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePesajeRequest'
+            example:
+              scaleId: "101"
+              packageId: "PKG-2024-001"
+              weightInKg: 20.055
+      responses:
+        '201':
+          description: Registro creado exitosamente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PesajeResponse'
+              example:
+                id: "64f1a2b3c4d5e6f7a8b9c0d1"
+                scaleId: "101"
+                packageId: "PKG-2024-001"
+                weightInSansas: 15.0
+                weightInKg: 20.055
+                weightCategory: "MEDIANO"
+                currentState: "INGRESADO"
+                stateHistory:
+                  - fromState: null
+                    toState: "INGRESADO"
+                    timestamp: "2024-11-15T10:30:00Z"
+                createdAt: "2024-11-15T10:30:00Z"
+                updatedAt: "2024-11-15T10:30:00Z"
+        '400':
+          description: Error de validación de datos de entrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: 400
+                error: "Bad Request"
+                message: "weightInKg must be positive"
+                timestamp: "2024-11-15T10:30:00Z"
+        '422':
+          description: Violación de regla de negocio
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                restriccionNocturna:
+                  summary: Restricción horaria nocturna
+                  value:
+                    status: 422
+                    error: "Business Rule Violation"
+                    message: "No se puede procesar paquetes PESADO en horario nocturno (20:00 - 06:00)"
+                    timestamp: "2024-11-15T21:00:00Z"
+                restriccionPrima:
+                  summary: Restricción balanza prima en día impar
+                  value:
+                    status: 422
+                    error: "Business Rule Violation"
+                    message: "La balanza con ID primo no puede registrar paquetes PESADO en días impares"
+                    timestamp: "2024-11-15T10:30:00Z"
+
+    get:
+      tags:
+        - Pesajes
+      summary: Obtener registros de pesaje filtrados por fecha
+      description: |
+        Retorna todos los registros de pesaje correspondientes a la fecha indicada.
+        La fecha se filtra por el campo `createdAt` del registro.
+      operationId: getPesajes
+      parameters:
+        - name: fecha
+          in: query
+          required: true
+          description: Fecha de filtro en formato ISO (YYYY-MM-DD)
+          schema:
+            type: string
+            format: date
+            example: "2024-11-15"
+      responses:
+        '200':
+          description: Lista de registros recuperada exitosamente
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PesajeResponse'
+              example:
+                - id: "64f1a2b3c4d5e6f7a8b9c0d1"
+                  scaleId: "101"
+                  packageId: "PKG-2024-001"
+                  weightInSansas: 15.0
+                  weightInKg: 20.055
+                  weightCategory: "MEDIANO"
+                  currentState: "PESADO"
+                  stateHistory:
+                    - fromState: null
+                      toState: "INGRESADO"
+                      timestamp: "2024-11-15T10:30:00Z"
+                    - fromState: "INGRESADO"
+                      toState: "PESADO"
+                      timestamp: "2024-11-15T10:35:00Z"
+                  createdAt: "2024-11-15T10:30:00Z"
+                  updatedAt: "2024-11-15T10:35:00Z"
+
+  /api/pesajes/{id}/estado:
+    put:
+      tags:
+        - Pesajes
+      summary: Actualizar el estado de un registro de pesaje
+      description: |
+        Actualiza el estado de un registro siguiendo las transiciones válidas:
+
+        ```
+        INGRESADO → PESADO → APROBADO o RECHAZADO → DESPACHADO
+        ```
+
+        Cualquier transición no permitida lanza una excepción `IllegalWeighingStateException` con código 400.
+      operationId: updateEstado
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID del registro de pesaje (MongoDB ObjectId)
+          schema:
+            type: string
+            example: "64f1a2b3c4d5e6f7a8b9c0d1"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateEstadoRequest'
+            example:
+              newState: "PESADO"
+      responses:
+        '200':
+          description: Estado actualizado exitosamente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PesajeResponse'
+              example:
+                id: "64f1a2b3c4d5e6f7a8b9c0d1"
+                scaleId: "101"
+                packageId: "PKG-2024-001"
+                weightInSansas: 15.0
+                weightInKg: 20.055
+                weightCategory: "MEDIANO"
+                currentState: "PESADO"
+                stateHistory:
+                  - fromState: null
+                    toState: "INGRESADO"
+                    timestamp: "2024-11-15T10:30:00Z"
+                  - fromState: "INGRESADO"
+                    toState: "PESADO"
+                    timestamp: "2024-11-15T10:35:00Z"
+                createdAt: "2024-11-15T10:30:00Z"
+                updatedAt: "2024-11-15T10:35:00Z"
+        '400':
+          description: Transición de estado inválida (IllegalWeighingStateException)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: 400
+                error: "Illegal Weighing State"
+                message: "Transición inválida: no se puede pasar de INGRESADO a APROBADO"
+                timestamp: "2024-11-15T10:30:00Z"
+        '404':
+          description: Registro de pesaje no encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: 404
+                error: "Not Found"
+                message: "RegistroPesaje con id '64f1a2b3c4d5e6f7a8b9c0d1' no encontrado"
+                timestamp: "2024-11-15T10:30:00Z"
+
+components:
+  schemas:
+    CreatePesajeRequest:
+      type: object
+      required:
+        - scaleId
+        - packageId
+        - weightInKg
+      properties:
+        scaleId:
+          type: string
+          description: Identificador único de la balanza
+          example: "101"
+        packageId:
+          type: string
+          description: Identificador único del paquete
+          example: "PKG-2024-001"
+        weightInKg:
+          type: number
+          format: double
+          description: Peso del paquete en kilogramos (debe ser positivo)
+          minimum: 0
+          exclusiveMinimum: true
+          example: 20.055
+
+    UpdateEstadoRequest:
+      type: object
+      required:
+        - newState
+      properties:
+        newState:
+          $ref: '#/components/schemas/WeighingState'
+
+    PesajeResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          description: ID autogenerado del registro (MongoDB ObjectId)
+          example: "64f1a2b3c4d5e6f7a8b9c0d1"
+        scaleId:
+          type: string
+          description: ID de la balanza utilizada
+          example: "101"
+        packageId:
+          type: string
+          description: ID del paquete pesado
+          example: "PKG-2024-001"
+        weightInSansas:
+          type: number
+          format: double
+          description: Peso convertido a Sansas (weightInKg ÷ 1.337)
+          example: 15.0
+        weightInKg:
+          type: number
+          format: double
+          description: Peso original en kilogramos
+          example: 20.055
+        weightCategory:
+          $ref: '#/components/schemas/WeightCategory'
+        currentState:
+          $ref: '#/components/schemas/WeighingState'
+        stateHistory:
+          type: array
+          description: Historial completo de transiciones de estado con marcas de tiempo
+          items:
+            $ref: '#/components/schemas/StateTransition'
+        createdAt:
+          type: string
+          format: date-time
+          description: Fecha/hora de creación del registro
+          example: "2024-11-15T10:30:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          description: Fecha/hora de última actualización
+          example: "2024-11-15T10:35:00Z"
+
+    StateTransition:
+      type: object
+      description: Registro de una transición de estado en el historial
+      properties:
+        fromState:
+          allOf:
+            - $ref: '#/components/schemas/WeighingState'
+          nullable: true
+          description: Estado origen (null para la transición inicial)
+        toState:
+          $ref: '#/components/schemas/WeighingState'
+        timestamp:
+          type: string
+          format: date-time
+          description: Momento exacto en que ocurrió la transición
+          example: "2024-11-15T10:30:00Z"
+
+    WeighingState:
+      type: string
+      description: |
+        Estado del ciclo de vida del pesaje:
+        - `INGRESADO`: Estado inicial al crear el registro
+        - `PESADO`: El paquete fue físicamente pesado
+        - `APROBADO`: El pesaje fue aprobado (solo desde PESADO)
+        - `RECHAZADO`: El pesaje fue rechazado (solo desde PESADO)
+        - `DESPACHADO`: El paquete fue despachado (solo desde APROBADO o RECHAZADO)
+      enum:
+        - INGRESADO
+        - PESADO
+        - APROBADO
+        - RECHAZADO
+        - DESPACHADO
+      example: INGRESADO
+
+    WeightCategory:
+      type: string
+      description: |
+        Categoría del paquete según su peso en Sansas:
+        - `LIVIANO`: ≤ 10 Sansas
+        - `MEDIANO`: > 10 y ≤ 50 Sansas
+        - `PESADO`: > 50 Sansas
+      enum:
+        - LIVIANO
+        - MEDIANO
+        - PESADO
+      example: MEDIANO
+
+    ScaleSpecification:
+      type: object
+      description: Especificación técnica de una balanza (obtenida de API externa con fallback Redis)
+      properties:
+        id:
+          type: string
+          description: Identificador único de la balanza (-1 para especificación por defecto)
+          example: "101"
+        name:
+          type: string
+          description: Nombre descriptivo de la balanza
+          example: "Balanza Central Sur"
+        brand:
+          type: string
+          description: Marca/modelo de la balanza
+          example: "SansaScale-Pro"
+        maxCapacity:
+          type: number
+          format: double
+          description: Capacidad máxima en Sansas
+          example: 150.0
+        precision:
+          type: number
+          format: double
+          description: Precisión de la balanza
+          example: 0.01
+        lastCalibrationOffset:
+          type: number
+          format: double
+          description: Offset de última calibración
+          example: -0.05
+
+    ErrorResponse:
+      type: object
+      description: Respuesta estándar de error
+      properties:
+        status:
+          type: integer
+          description: Código HTTP del error
+          example: 400
+        error:
+          type: string
+          description: Nombre del error
+          example: "Bad Request"
+        message:
+          type: string
+          description: Descripción detallada del error
+          example: "weightInKg must be positive"
+        timestamp:
+          type: string
+          format: date-time
+          description: Momento en que ocurrió el error
+          example: "2024-11-15T10:30:00Z"
